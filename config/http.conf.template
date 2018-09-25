@@ -1,0 +1,116 @@
+http {
+    include                         /etc/nginx/mime.types;
+    default_type                    application/octet-stream;
+ 
+    log_format                      main ${LOG_FORMAT:-'\$remote_addr - \$remote_user [\$time_local] \"\$request\" \$status \$body_bytes_sent \"\$http_referer\" \"\$http_user_agent\" \"\$http_x_forwarded_for\"'};
+ 
+    access_log                      /var/log/nginx/access.log main;
+ 
+    sendfile                        on;
+    #tcp_nopush                     on;
+ 
+    keepalive_timeout               65;
+ 
+    server_tokens                   ${SERVER_TOKENS:-off};
+ 
+    #gzip                           on;
+ 
+    server {
+        listen                      ${BIND_ADDRESS4:-0.0.0.0}:80;
+        server_name                 ${SERVER_NAMES};
+    
+        return                      301 https://\$server_name\$request_uri;
+    }
+    
+    server {
+        # VARIABLES
+        set \$admin admin;
+        set \$antispam antispam:11334;
+        set \$webmail webmail;
+        set \$webdav webdav:5232;
+    
+        listen                      ${BIND_ADDRESS4:-0.0.0.0}:443 ssl http2;
+        server_name                 ${SERVER_NAMES};
+        root                        ${ROOT_DIR:-/usr/share/nginx/html};
+    
+        # LOGGING
+        access_log                  /var/log/nginx/${DOMAIN}/access.log main;
+        error_log                   /var/log/nginx/${DOMAIN}/error.log;
+    
+        # HEADER
+        add_header                  X-Frame-Options '${X_FRAME_OPTIONS:-SAMEORIGIN}';
+        add_header                  X-XSS-Protection '${X_XSS_PROTECTION:-"1;mode=block"}';
+        add_header                  X-Content-Type-Options '${X_CONTENT_TYPE_OPTIONS:-nosniff}';
+        add_header                  Referrer-Policy '${REFERRER_POLICY:-same-origin}';
+        add_header                  Expect-CT '${EXPECT_CT:-max-age=0}';
+        add_header                  Strict-Transport-Security '${STRICT_TRANSPORT_SECURITY:-max-age=315360000;includeSubdomains;preload}';
+    
+        # SSL
+        include                     /etc/nginx/tls.conf;
+    
+        # OCSP
+        ssl_stapling                on;
+        ssl_stapling_verify         on;
+        ssl_trusted_certificate     /etc/ssl/${DOMAIN}/${DOMAIN}-fullchain.pem;
+    
+        # DISABLE HTTP METHODS
+        if (\$request_method !~ ^(GET|HEAD|POST)\$) {
+            return 444;
+        }
+    
+        location / {
+            return                  301 /webmail;
+        }
+    
+        location ^~ /.well-known/acme-challenge/ {
+            proxy_pass              http://127.0.0.1:8008;
+        }
+    
+        location /webmail {
+            rewrite                 ^(/webmail)\$ \$1/ permanent;
+            rewrite                 ^/webmail/(.*) /\$1 break;
+            include                 /etc/nginx/proxy.conf;
+            client_max_body_size    ${CLIENT_MAX_BODY_SIZE:-30M};
+            proxy_pass              http://\$webmail;
+        }
+    
+        location /admin {
+            return                  301 /admin/ui;
+        }
+    
+        location ~ /admin/(ui|static) {
+            rewrite                 ^/admin/antispam/(.*) /\$1 break;
+            include                 /etc/nginx/proxy.conf;
+            proxy_set_header        X-Forwarded_Prefix /admin;
+            proxy_pass              http://\$admin;
+        }
+    
+        location /admin/antispam {
+            rewrite                 ^/admin/antispam/(.*) /\$1 break;
+            auth_request            /internal/auth/admin;
+            proxy_set_header        X-Real-IP '';
+            proxy_set_header        X-Forwarded-For '';
+            proxy_pass              http://\$antispam;
+        }
+    
+        location /webdav {
+            rewrite                 ^/webdav/(.*) /\$1 break;
+            auth_request            /internal/auth/basic;
+            auth_request_set        \$user \$upstream_http_x_user;
+            include                 /etc/nginx/proxy.conf;
+            proxy_set_header        X-Remote-User \$user;
+            proxy_set_header        X-Script-Name /webdav;
+            proxy_pass              http://\$webdav;
+        }
+    
+        location /internal {
+            internal;
+    
+            proxy_set_header        Authorization \$http_authorization;
+            proxy_pass_header       Authorization;
+            proxy_pass              http://\$admin;
+            proxy_pass_request_body off;
+            proxy_set_header        Content-Length '';
+        }
+    }
+}
